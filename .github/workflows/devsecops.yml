@@ -1,61 +1,25 @@
-name: DevSecOps Pipeline
+deploy:
+  name: Deploy to DockerHub
+  needs: devsecops  # يحتاج لنجاح job اللي فيه build
+  runs-on: ubuntu-latest
+  if: github.ref == 'refs/heads/main' && success()
 
-on:
-  push:
-    branches: [ "main" ]
+  steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
 
-permissions:
-  contents: read
-  security-events: write
-  actions: read
+    - name: Login to DockerHub
+      uses: docker/login-action@v3
+      with:
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-jobs:
-  devsecops:
-    runs-on: ubuntu-latest
+    - name: Build and push Docker image
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        push: true
+        tags: ${{ secrets.DOCKERHUB_USERNAME }}/devsecops-api:latest
 
-    steps:
-      # 1. Checkout code
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      ############################################
-      # 2. Analyse SAST avec CodeQL
-      ############################################
-      - name: Initialize CodeQL
-        uses: github/codeql-action/init@v3
-        with:
-          languages: python
-
-      - name: Perform CodeQL Analysis
-        uses: github/codeql-action/analyze@v3
-
-      ############################################
-      # 3. Analyse sécurité Python avec Bandit
-      ############################################
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.9"
-
-      - name: Install Bandit
-        run: pip install bandit
-
-      - name: Run Bandit security scan
-        run: bandit -r api -ll  # -ll = afficher high & medium
-
-      ############################################
-      # 4. Build Docker image
-      ############################################
-      - name: Build Docker image
-        run: docker build -t devsecops-api .
-
-      ############################################
-      # 5. Scan Docker image avec Trivy
-      ############################################
-      - name: Run Trivy vulnerability scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          scan-type: image
-          image-ref: devsecops-api
-          severity: CRITICAL,HIGH
-          exit-code: 1
+    - name: Deployment summary
+      run: echo "✅ Image pushed to DockerHub successfully!"
