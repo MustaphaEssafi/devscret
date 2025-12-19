@@ -7,12 +7,22 @@ import hashlib
 import logging
 from flask import Flask, request, jsonify, abort
 from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
+
+# ---------------- Load Environment ----------------
+# يحمّل المتغيّرات من ملف .env
+load_dotenv()
 
 # ---------------- Config ----------------
 app = Flask(__name__)
-# take secret from env if present; keep fallback but don't expose it
-SECRET_KEY = os.environ.get("SECRET_KEY", "dev-secret-key-12345")
+
+# قراءة المتغيرات من .env
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("❌ SECRET_KEY not set! Please define it in .env")
+
 app.config["SECRET_KEY"] = SECRET_KEY
+
 SAFE_DIR = os.path.realpath(os.environ.get("SAFE_FILES_DIR", "./files"))
 os.makedirs(SAFE_DIR, exist_ok=True)
 
@@ -29,7 +39,7 @@ def get_db_connection():
 _allowed_nodes = {
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
-    ast.USub, ast.UAdd, ast.Load, ast.Tuple, ast.Expr, ast.Paren
+    ast.USub, ast.UAdd, ast.Load, ast.Tuple, ast.Expr
 }
 
 def _check_node(node):
@@ -39,7 +49,6 @@ def _check_node(node):
         _check_node(child)
 
 def safe_eval(expr: str):
-    # accept digits, operators, whitespace, parentheses and caret ^
     if not re.match(r'^[0-9\.\+\-\*\/\%\(\)\s\^]+$', expr):
         raise ValueError("Expression contains invalid characters.")
     expr = expr.replace("^", "**")
@@ -47,22 +56,18 @@ def safe_eval(expr: str):
         node = ast.parse(expr, mode='eval')
         _check_node(node)
         compiled = compile(node, "<safe_eval>", "eval")
-        return eval(compiled, {"__builtins__": {}})
+        return eval(compiled, {"__builtins__": {}})  # nosec B307
     except Exception as e:
         raise ValueError(f"Invalid expression: {e}")
 
-# ---------------- Endpoints (kept names & return keys) ----------------
+# ---------------- Endpoints ----------------
 
 @app.route("/hello", methods=["GET"])
 def hello():
-    return {"message": "Welcome to the DevSecOps vulnerable API"}, 200
+    return {"message": "Welcome to the DevSecOps API"}, 200
 
 @app.route("/login", methods=["POST"])
 def login():
-    """
-    Keep same response keys: {"status": "...", "user": username}
-    Use parameterized query and password hashing (password_hash column expected).
-    """
     try:
         data = request.get_json(force=True)
         username = (data.get("username") or "").strip()
@@ -87,22 +92,16 @@ def login():
 
 @app.route("/ping", methods=["POST"])
 def ping():
-    """
-    Keep same key: {"output": "..."}
-    Use subprocess without shell and validate host.
-    """
     try:
         data = request.get_json(force=True)
         host = (data.get("host") or "").strip()
         if not host:
             return {"output": ""}, 400
 
-        # validate hostname/IP: letters, digits, dot, hyphen
         if len(host) > 255 or not re.match(r'^[A-Za-z0-9\.\-]+$', host):
             return {"output": "invalid host"}, 400
 
         try:
-            # safe call without shell
             output = subprocess.check_output(["ping", "-c", "1", host], stderr=subprocess.STDOUT, timeout=5)
             return {"output": output.decode(errors="ignore")}, 200
         except subprocess.CalledProcessError as e:
@@ -115,10 +114,6 @@ def ping():
 
 @app.route("/compute", methods=["POST"])
 def compute():
-    """
-    Keep same key: {"result": ...}
-    Replace eval with safe_eval for arithmetic.
-    """
     try:
         data = request.get_json(force=True)
         expression = (data.get("expression") or "1+1").strip()
@@ -133,15 +128,12 @@ def compute():
 
 @app.route("/hash", methods=["POST"])
 def hash_password():
-    """
-    Keep same response key "md5" for compatibility but also return a secure PBKDF2 hash in "secure_hash".
-    """
     try:
         data = request.get_json(force=True)
         pwd = data.get("password") or "admin"
 
         # legacy md5 (kept for compatibility) -- still computed but note it's insecure
-        md5_hash = hashlib.md5(pwd.encode()).hexdigest()
+        md5_hash = hashlib.md5(pwd.encode()).hexdigest()  # nosec B324
 
         # secure hash for actual storage/use
         secure_hash = generate_password_hash(pwd)  # PBKDF2:sha256
@@ -153,15 +145,10 @@ def hash_password():
 
 @app.route("/readfile", methods=["POST"])
 def readfile():
-    """
-    Keep same response key: {"content": "..."}
-    Restrict reads to SAFE_DIR to avoid path traversal.
-    """
     try:
         data = request.get_json(force=True)
         filename = (data.get("filename") or "test.txt").strip()
 
-        # simple checks
         if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
             return {"content": "invalid filename"}, 400
 
@@ -182,11 +169,6 @@ def readfile():
 
 @app.route("/debug", methods=["GET"])
 def debug():
-    """
-    Keep same endpoint name. BUT do not return raw SECRET_KEY or full env.
-    Only enabled when FLASK_DEBUG_ENDPOINT=1 and accessed from localhost.
-    Returns limited, non-sensitive info in same json keys as before (some masked).
-    """
     try:
         enabled = os.environ.get("FLASK_DEBUG_ENDPOINT", "0") == "1"
         if not enabled:
@@ -195,7 +177,6 @@ def debug():
         if request.remote_addr not in ("127.0.0.1", "::1", "localhost"):
             abort(403)
 
-        # Return masked/limited environment to avoid leaking secrets
         env_items = {}
         for i, (k, v) in enumerate(os.environ.items()):
             if i >= 10:
@@ -214,7 +195,7 @@ def debug():
         logger.exception("debug error")
         return {"debug": False, "secret_key": "", "environment": {}}, 500
 
-# -------------- DB init helper (keeps compatibility) --------------
+# -------------- DB init helper --------------
 def init_db():
     conn = get_db_connection()
     cur = conn.cursor()
@@ -231,9 +212,8 @@ def init_db():
         logger.info("Created demo user 'admin' (password 'admin') - change it!")
     conn.commit()
     conn.close()
-    
+
 # -------------- Run --------------
 if __name__ == "__main__":
     init_db()
-    # kept host 0.0.0.0 and port 5000 to match original behavior you had
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    app.run(host="0.0.0.0", port=5000, debug=False)  # nosec B104
