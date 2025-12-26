@@ -10,13 +10,13 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from dotenv import load_dotenv
 
 # ---------------- Load Environment ----------------
-# يحمّل المتغيّرات من ملف .env
+
 load_dotenv()
 
 # ---------------- Config ----------------
 app = Flask(__name__)
 
-# قراءة المتغيرات من .env
+
 SECRET_KEY = os.environ.get("SECRET_KEY")
 if not SECRET_KEY:
     raise RuntimeError("❌ SECRET_KEY not set! Please define it in .env")
@@ -29,13 +29,12 @@ os.makedirs(SAFE_DIR, exist_ok=True)
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# ---------------- helpers ----------------
 def get_db_connection():
     conn = sqlite3.connect("users.db", timeout=5)
     conn.row_factory = sqlite3.Row
     return conn
 
-# safe evaluator for arithmetic expressions only
+
 _allowed_nodes = {
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
