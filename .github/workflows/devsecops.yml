@@ -14,7 +14,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      ############################################
       # 1. Checkout code
+      ############################################
       - name: Checkout repository
         uses: actions/checkout@v3
 
@@ -41,16 +43,25 @@ jobs:
         run: pip install bandit
 
       - name: Run Bandit security scan
-        run: bandit -r api -ll  # -ll = afficher high & medium
+        run: bandit -r api -ll  # -ll = afficher high & medium severities
 
       ############################################
-      # 4. Build Docker image
+      # 4. Scan des dépendances Python avec Safety
+      ############################################
+      - name: Install Safety
+        run: pip install safety
+
+      - name: Dependency vulnerability scan
+        run: safety scan --file=requirements.txt --full-report
+
+      ############################################
+      # 5. Build Docker image
       ############################################
       - name: Build Docker image
         run: docker build -t devsecops-api .
 
       ############################################
-      # 5. Scan Docker image avec Trivy
+      # 6. Scan Docker image avec Trivy
       ############################################
       - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@master
