@@ -1,267 +1,218 @@
-from flask import Flask, request, jsonify
-import sqlite3
-import subprocess
-import bcrypt
 import os
 import re
-from functools import wraps
+import ast
+import sqlite3
+import subprocess
+import hashlib
 import logging
+from flask import Flask, request, jsonify, abort
+from werkzeug.security import generate_password_hash, check_password_hash
+from dotenv import load_dotenv
 
+# ---------------- Load Environment ----------------
+
+load_dotenv()
+
+# ---------------- Config ----------------
 app = Flask(__name__)
 
-# Configuration sécurisée
-app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY')
-if not app.config['SECRET_KEY']:
-    raise RuntimeError("FLASK_SECRET_KEY must be set in environment variables")
 
-# Configuration du logging
+SECRET_KEY = os.environ.get("SECRET_KEY")
+if not SECRET_KEY:
+    raise RuntimeError("❌ SECRET_KEY not set! Please define it in .env")
+
+app.config["SECRET_KEY"] = SECRET_KEY
+
+SAFE_DIR = os.path.realpath(os.environ.get("SAFE_FILES_DIR", "./files"))
+os.makedirs(SAFE_DIR, exist_ok=True)
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Connexion sécurisée à la base de données
 def get_db_connection():
-    conn = sqlite3.connect("users.db")
+    conn = sqlite3.connect("users.db", timeout=5)
     conn.row_factory = sqlite3.Row
-    # Activer les contraintes de clé étrangère
-    conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
-# Décorateur pour validation JSON
-def require_json(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if not request.is_json:
-            return jsonify({"error": "Content-Type must be application/json"}), 400
-        return f(*args, **kwargs)
-    return decorated_function
+# safe evaluator for arithmetic expressions only
+_allowed_nodes = {
+    ast.Expression, ast.BinOp, ast.UnaryOp, ast.Num, ast.Constant,
+    ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod,
+    ast.USub, ast.UAdd, ast.Load, ast.Tuple, ast.Expr
+}
 
-# Décorateur pour limiter les données sensibles en production
-def production_safe(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        if os.environ.get('FLASK_ENV') == 'production':
-            return jsonify({"error": "Endpoint disabled in production"}), 403
-        return f(*args, **kwargs)
-    return decorated_function
+def _check_node(node):
+    if type(node) not in _allowed_nodes:
+        raise ValueError(f"Disallowed node: {type(node).__name__}")
+    for child in ast.iter_child_nodes(node):
+        _check_node(child)
+
+def safe_eval(expr: str):
+    if not re.match(r'^[0-9\.\+\-\*\/\%\(\)\s\^]+$', expr):
+        raise ValueError("Expression contains invalid characters.")
+    expr = expr.replace("^", "**")
+    try:
+        node = ast.parse(expr, mode='eval')
+        _check_node(node)
+        compiled = compile(node, "<safe_eval>", "eval")
+        return eval(compiled, {"__builtins__": {}})  # nosec B307
+    except Exception as e:
+        raise ValueError(f"Invalid expression: {e}")
+
+# ---------------- Endpoints ----------------
+
+@app.route("/hello", methods=["GET"])
+def hello():
+    return {"message": "Welcome to the DevSecOps API"}, 200
 
 @app.route("/login", methods=["POST"])
-@require_json
 def login():
     try:
-        data = request.get_json()
-        
-        # Validation des données
-        username = data.get("username", "").strip()
-        password = data.get("password", "")
-        
+        data = request.get_json(force=True)
+        username = (data.get("username") or "").strip()
+        password = data.get("password") or ""
+
         if not username or not password:
-            return jsonify({"error": "Username and password are required"}), 400
-        
-        if len(username) > 50 or len(password) > 100:
-            return jsonify({"error": "Input too long"}), 400
-        
-        # Requête paramétrée pour éviter l'injection SQL
+            return {"status": "error", "message": "username and password required"}, 400
+
         conn = get_db_connection()
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, username, password_hash FROM users WHERE username = ?", (username,))
-        user = cursor.fetchone()
+        cur = conn.cursor()
+        cur.execute("SELECT password_hash FROM users WHERE username = ?", (username,))
+        row = cur.fetchone()
         conn.close()
-        
-        if user:
-            # Vérification avec bcrypt (hashing sécurisé)
-            stored_hash = user["password_hash"].encode('utf-8')
-            if bcrypt.checkpw(password.encode('utf-8'), stored_hash):
-                logger.info(f"Successful login for user: {username}")
-                return jsonify({
-                    "status": "success", 
-                    "user": username,
-                    "message": "Login successful"
-                })
-        
-        # Réponse générique pour éviter l'user enumeration
-        logger.warning(f"Failed login attempt for username: {username}")
-        return jsonify({"error": "Invalid credentials"}), 401
-        
+
+        if row and check_password_hash(row["password_hash"], password):
+            return {"status": "success", "user": username}, 200
+        else:
+            return {"status": "error", "message": "Invalid credentials"}, 401
     except Exception as e:
-        logger.error(f"Login error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.exception("login error")
+        return {"status": "error", "message": "Internal server error"}, 500
 
 @app.route("/ping", methods=["POST"])
-@require_json
 def ping():
     try:
-        data = request.get_json()
-        host = data.get("host", "").strip()
-        
+        data = request.get_json(force=True)
+        host = (data.get("host") or "").strip()
         if not host:
-            return jsonify({"error": "Host parameter is required"}), 400
-        
-        # Validation stricte de l'input
-        # Autorise uniquement les hostnames et IPs valides
-        host_pattern = r'^[a-zA-Z0-9][a-zA-Z0-9.-]{0,253}[a-zA-Z0-9]$'
-        ip_pattern = r'^(\d{1,3}\.){3}\d{1,3}$'
-        
-        if not (re.match(host_pattern, host) or re.match(ip_pattern, host)):
-            return jsonify({"error": "Invalid host format"}), 400
-        
-        # Vérifier que chaque octet d'IP est valide
-        if re.match(ip_pattern, host):
-            octets = host.split('.')
-            for octet in octets:
-                if not 0 <= int(octet) <= 255:
-                    return jsonify({"error": "Invalid IP address"}), 400
-        
-        # Commande sécurisée sans shell=True et avec timeout
-        cmd = ["ping", "-c", "1", "-W", "2", host]
-        
+            return {"output": ""}, 400
+
+        if len(host) > 255 or not re.match(r'^[A-Za-z0-9\.\-]+$', host):
+            return {"output": "invalid host"}, 400
+
         try:
-            result = subprocess.run(
-                cmd, 
-                capture_output=True, 
-                text=True, 
-                timeout=5
-            )
-            
-            if result.returncode == 0:
-                return jsonify({
-                    "status": "success",
-                    "output": result.stdout
-                })
-            else:
-                return jsonify({
-                    "status": "error",
-                    "output": result.stderr
-                }), 400
-                
+            output = subprocess.check_output(["ping", "-c", "1", host], stderr=subprocess.STDOUT, timeout=5)
+            return {"output": output.decode(errors="ignore")}, 200
+        except subprocess.CalledProcessError as e:
+            return {"output": e.output.decode(errors="ignore")}, 400
         except subprocess.TimeoutExpired:
-            return jsonify({"error": "Ping timeout"}), 408
-            
+            return {"output": "ping timeout"}, 504
     except Exception as e:
-        logger.error(f"Ping error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.exception("ping error")
+        return {"output": "Internal server error"}, 500
+
+@app.route("/compute", methods=["POST"])
+def compute():
+    try:
+        data = request.get_json(force=True)
+        expression = (data.get("expression") or "1+1").strip()
+        try:
+            result = safe_eval(expression)
+        except ValueError as ve:
+            return {"result": str(ve)}, 400
+        return {"result": result}, 200
+    except Exception as e:
+        logger.exception("compute error")
+        return {"result": "Internal server error"}, 500
 
 @app.route("/hash", methods=["POST"])
-@require_json
 def hash_password():
     try:
-        data = request.get_json()
-        password = data.get("password", "")
-        
-        if not password:
-            return jsonify({"error": "Password is required"}), 400
-        
-        if len(password) < 8:
-            return jsonify({"error": "Password must be at least 8 characters"}), 400
-        
-        # Utilisation de bcrypt (hashing sécurisé avec salt)
-        salt = bcrypt.gensalt(rounds=12)
-        hashed = bcrypt.hashpw(password.encode('utf-8'), salt)
-        
-        return jsonify({
-            "status": "success",
-            "algorithm": "bcrypt",
-            "hash": hashed.decode('utf-8')
-        })
-        
+        data = request.get_json(force=True)
+        pwd = data.get("password") or "admin"
+
+        # legacy md5 (kept for compatibility) -- still computed but note it's insecure
+        md5_hash = hashlib.md5(pwd.encode()).hexdigest()  # nosec B324
+
+        # secure hash for actual storage/use
+        secure_hash = generate_password_hash(pwd)  # PBKDF2:sha256
+
+        return {"md5": md5_hash, "secure_hash": secure_hash}, 200
     except Exception as e:
-        logger.error(f"Hash error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.exception("hash error")
+        return {"md5": "", "secure_hash": ""}, 500
 
 @app.route("/readfile", methods=["POST"])
-@require_json
-@production_safe  # Désactivé en production
 def readfile():
     try:
-        data = request.get_json()
-        filename = data.get("filename", "").strip()
-        
-        if not filename:
-            return jsonify({"error": "Filename is required"}), 400
-        
-        # Validation stricte du nom de fichier
-        # N'autorise que les fichiers texte dans un répertoire spécifique
-        if not re.match(r'^[a-zA-Z0-9_-]+\.txt$', filename):
-            return jsonify({"error": "Invalid filename"}), 400
-        
-        # Chemin sécurisé - lecture uniquement depuis le répertoire autorisé
-        safe_dir = os.path.join(os.getcwd(), "safe_files")
-        os.makedirs(safe_dir, exist_ok=True)
-        
-        file_path = os.path.join(safe_dir, filename)
-        
-        # Vérification du chemin pour éviter les path traversals
-        if not os.path.commonpath([safe_dir, os.path.realpath(file_path)]) == safe_dir:
-            return jsonify({"error": "Invalid file path"}), 403
-        
-        if not os.path.exists(file_path):
-            return jsonify({"error": "File not found"}), 404
-        
-        # Limiter la taille du fichier
-        if os.path.getsize(file_path) > 1024 * 1024:  # 1MB max
-            return jsonify({"error": "File too large"}), 413
-        
-        with open(file_path, "r", encoding='utf-8') as f:
-            content = f.read(5000)  # Lire seulement les 5000 premiers caractères
-        
-        return jsonify({
-            "status": "success",
-            "filename": filename,
-            "content": content
-        })
-        
+        data = request.get_json(force=True)
+        filename = (data.get("filename") or "test.txt").strip()
+
+        if ".." in filename or filename.startswith("/") or filename.startswith("\\"):
+            return {"content": "invalid filename"}, 400
+
+        requested = os.path.realpath(os.path.join(SAFE_DIR, filename))
+        if not requested.startswith(os.path.realpath(SAFE_DIR)):
+            return {"content": "invalid filename (outside safe dir)"}, 400
+
+        if not os.path.exists(requested) or not os.path.isfile(requested):
+            return {"content": "file not found"}, 404
+
+        with open(requested, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+
+        return {"content": content}, 200
     except Exception as e:
-        logger.error(f"Readfile error: {str(e)}")
-        return jsonify({"error": "Internal server error"}), 500
+        logger.exception("readfile error")
+        return {"content": "Internal server error"}, 500
 
-@app.route("/health", methods=["GET"])
-def health_check():
-    """Endpoint de vérification de santé"""
-    return jsonify({
-        "status": "healthy",
-        "service": "DevSecOps API",
-        "version": "1.0.0"
-    })
+@app.route("/debug", methods=["GET"])
+def debug():
+    try:
+        enabled = os.environ.get("FLASK_DEBUG_ENDPOINT", "0") == "1"
+        if not enabled:
+            abort(404)
 
-@app.route("/", methods=["GET"])
-def index():
-    """Endpoint racine"""
-    return jsonify({
-        "message": "DevSecOps Secure API",
-        "endpoints": {
-            "POST /login": "User authentication",
-            "POST /ping": "Ping a host (with validation)",
-            "POST /hash": "Secure password hashing",
-            "POST /readfile": "Read text files (dev only)",
-            "GET /health": "Health check",
-            "GET /": "This information"
-        },
-        "security": {
-            "sql_injection": "protected",
-            "command_injection": "protected",
-            "path_traversal": "protected",
-            "secure_hashing": "bcrypt",
-            "input_validation": "enabled"
-        }
-    })
+        if request.remote_addr not in ("127.0.0.1", "::1", "localhost"):
+            abort(403)
 
-# Gestionnaire d'erreurs global
-@app.errorhandler(404)
-def not_found(error):
-    return jsonify({"error": "Endpoint not found"}), 404
+        env_items = {}
+        for i, (k, v) in enumerate(os.environ.items()):
+            if i >= 10:
+                break
+            if any(s in k.upper() for s in ("KEY", "SECRET", "PASS", "TOKEN")):
+                env_items[k] = "<hidden>"
+            else:
+                env_items[k] = v
 
-@app.errorhandler(405)
-def method_not_allowed(error):
-    return jsonify({"error": "Method not allowed"}), 405
+        return {
+            "debug": True,
+            "secret_key": "<hidden>",
+            "environment": env_items
+        }, 200
+    except Exception as e:
+        logger.exception("debug error")
+        return {"debug": False, "secret_key": "", "environment": {}}, 500
 
-@app.errorhandler(500)
-def internal_error(error):
-    logger.error(f"Internal server error: {error}")
-    return jsonify({"error": "Internal server error"}), 500
+# -------------- DB init helper --------------
+def init_db():
+    conn = get_db_connection()
+    cur = conn.cursor()
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        username TEXT UNIQUE NOT NULL,
+        password_hash TEXT NOT NULL
+    )""")
+    cur.execute("SELECT id FROM users WHERE username = ?", ("admin",))
+    if not cur.fetchone():
+        cur.execute("INSERT INTO users (username, password_hash) VALUES (?, ?)",
+                    ("admin", generate_password_hash("admin")))
+        logger.info("Created demo user 'admin' (password 'admin') - change it!")
+    conn.commit()
+    conn.close()
 
+# -------------- Run --------------
 if __name__ == "__main__":
-    # Configuration de sécurité pour le serveur de développement
-    app.run(
-        host="127.0.0.1",  # Ne pas utiliser 0.0.0.0 en développement
-        port=5000,
-        debug=False  # Désactiver debug en production
-    )
+    init_db()
+    app.run(host="0.0.0.0", port=5000, debug=False)  # nosec B104

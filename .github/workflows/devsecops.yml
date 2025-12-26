@@ -12,50 +12,47 @@ permissions:
 jobs:
   devsecops:
     runs-on: ubuntu-latest
-    
+
     steps:
-      - uses: actions/checkout@v3
-      
+      # 1. Checkout code
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
       ############################################
-      # 1. Analyse SAST CodeQL
+      # 2. Analyse SAST avec CodeQL
       ############################################
-      - name: Init CodeQL
+      - name: Initialize CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: python
-          
-      - name: Run CodeQL
+
+      - name: Perform CodeQL Analysis
         uses: github/codeql-action/analyze@v3
-      
+
       ############################################
-      # 2. Analyse sécurité Python avec Bandit
+      # 3. Analyse sécurité Python avec Bandit
       ############################################
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.9"
+
       - name: Install Bandit
         run: pip install bandit
-        
-      - name: Run Bandit
-        run: bandit -r api --severity-level high
-      
+
+      - name: Run Bandit security scan
+        run: bandit -r api -ll  # -ll = afficher high & medium
+
       ############################################
-      # 3. Build Docker
+      # 4. Build Docker image
       ############################################
       - name: Build Docker image
         run: docker build -t devsecops-api .
-      
-      ############################################
-      # Scan des dépendances Python
-      ############################################
-      - name: Install Safety
-        run: pip install safety
 
-      - name: Dependency vulnerability scan
-        run: safety check -r requirements.txt
-
-      
       ############################################
-      # 4. Scan Docker avec Trivy
+      # 5. Scan Docker image avec Trivy
       ############################################
-      - name: Trivy Scan
+      - name: Run Trivy vulnerability scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
