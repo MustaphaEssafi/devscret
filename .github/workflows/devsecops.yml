@@ -59,3 +59,10 @@ jobs:
           image-ref: devsecops-api
           severity: CRITICAL,HIGH
           exit-code: 1
+############################################
+# Scan des dépendances Python
+############################################
+- name: Install Safety
+run: pip install safety
+- name: Dependency vulnerability scan
+run: safety check -r requirements.txt
