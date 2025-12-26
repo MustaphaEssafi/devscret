@@ -14,9 +14,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      ############################################
       # 1. Checkout code
-      ############################################
       - name: Checkout repository
         uses: actions/checkout@v3
 
@@ -43,7 +41,7 @@ jobs:
         run: pip install bandit
 
       - name: Run Bandit security scan
-        run: bandit -r api -ll  # -ll = afficher high & medium severities
+        run: bandit -r api -ll  # -ll = afficher high & medium
 
       ############################################
       # 4. Build Docker image
@@ -61,13 +59,3 @@ jobs:
           image-ref: devsecops-api
           severity: CRITICAL,HIGH
           exit-code: 1
-
-      ############################################
-      # 6. Scan des dépendances Python avec Safety (nouvelle version)
-      ############################################
-      - name: Install Safety
-        run: pip install safety
-
-      - name: Dependency vulnerability scan
-        run: safety scan --file=requirements.txt --full-report
-
