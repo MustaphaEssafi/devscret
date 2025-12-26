@@ -12,58 +12,50 @@ permissions:
 jobs:
   devsecops:
     runs-on: ubuntu-latest
-
+    
     steps:
+      - uses: actions/checkout@v3
+      
       ############################################
-      # 1. Checkout code
+      # 1. Analyse SAST CodeQL
       ############################################
-      - name: Checkout repository
-        uses: actions/checkout@v3
-
-      ############################################
-      # 2. Analyse SAST avec CodeQL
-      ############################################
-      - name: Initialize CodeQL
+      - name: Init CodeQL
         uses: github/codeql-action/init@v3
         with:
           languages: python
-
-      - name: Perform CodeQL Analysis
+          
+      - name: Run CodeQL
         uses: github/codeql-action/analyze@v3
-
+      
       ############################################
-      # 3. Analyse sécurité Python avec Bandit
+      # 2. Analyse sécurité Python avec Bandit
       ############################################
-      - name: Setup Python
-        uses: actions/setup-python@v4
-        with:
-          python-version: "3.9"
-
       - name: Install Bandit
         run: pip install bandit
-
-      - name: Run Bandit security scan
-        run: bandit -r api -ll  # -ll = afficher high & medium severities
-
+        
+      - name: Run Bandit
+        run: bandit -r api --severity-level high
+      
       ############################################
-      # 4. Scan des dépendances Python avec Safety
+      # 3. Build Docker
+      ############################################
+      - name: Build Docker image
+        run: docker build -t devsecops-api .
+      
+      ############################################
+      # Scan des dépendances Python
       ############################################
       - name: Install Safety
         run: pip install safety
 
       - name: Dependency vulnerability scan
-        run: safety scan --file=requirements.txt --full-report
+        run: safety check -r requirements.txt
 
+      
       ############################################
-      # 5. Build Docker image
+      # 4. Scan Docker avec Trivy
       ############################################
-      - name: Build Docker image
-        run: docker build -t devsecops-api .
-
-      ############################################
-      # 6. Scan Docker image avec Trivy
-      ############################################
-      - name: Run Trivy vulnerability scan
+      - name: Trivy Scan
         uses: aquasecurity/trivy-action@master
         with:
           scan-type: image
