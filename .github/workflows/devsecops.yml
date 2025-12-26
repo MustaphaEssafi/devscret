@@ -63,10 +63,11 @@ jobs:
           exit-code: 1
 
       ############################################
-      # 6. Scan des dépendances Python avec Safety
+      # 6. Scan des dépendances Python avec Safety (nouvelle version)
       ############################################
       - name: Install Safety
         run: pip install safety
 
       - name: Dependency vulnerability scan
-        run: safety check -r requirements.txt
+        run: safety scan --file=requirements.txt --full-report
+
